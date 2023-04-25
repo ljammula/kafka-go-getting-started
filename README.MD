@@ -17,7 +17,9 @@
 ### Consuming from Kafka using 3 consumers with same consumer-group-id
 
 `./out/kafka-go-getting-started read getting-started.properties consumer-group-1`
+
 `./out/kafka-go-getting-started read getting-started.properties consumer-group-1`
+
 `./out/kafka-go-getting-started read getting-started.properties consumer-group-1`
 .
 .
