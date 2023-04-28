@@ -17,6 +17,7 @@ http://localhost:8080/
 ## Build
 
 ```
+mkdir out
 go build -o out .
 ```
 
@@ -51,3 +52,9 @@ go build -o out .
 .
 .
 .
+
+### Skip offset
+
+```
+./out/kafka-go-getting-started reset-offset getting-started.properties -- consumer-group=consumer-group-1 partition=0 offset=30392
+```

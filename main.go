@@ -2,16 +2,24 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/confluentinc/confluent-kafka-go/kafka"
 	"github.com/spf13/cobra"
 )
+
+type Event struct {
+	User  string `json:"user"`
+	Items string `json:"items"`
+}
 
 func main() {
 
@@ -57,11 +65,96 @@ func main() {
 			readFromTopic(configFile, consumerGroupId)
 		},
 	}
+
+	var cmdResetOffset = &cobra.Command{
+		Use:   "reset-offset [properties-file-name]",
+		Short: "reset-offset kafka topic",
+		Run: func(cmd *cobra.Command, args []string) {
+			resetOffset(configFile, args)
+		},
+	}
 	rootCmd.AddCommand(cmdRead)
 	rootCmd.AddCommand(cmdWrite)
 	//without this, we will create a topic with single partition
 	rootCmd.AddCommand(cmdCreateTopic)
+	//reset offset
+	rootCmd.AddCommand(cmdResetOffset)
 	rootCmd.Execute()
+}
+
+func resetOffset(configFile string, args []string) {
+	consumerGroupId := "consumer-group-1"
+	var partition int32
+	var offset int64
+
+	// Parse flags into variables
+	for _, f := range args {
+		strs := strings.Split(f, "=")
+		if len(strs) == 2 {
+			switch strs[0] {
+			case "consumer-group":
+				consumerGroupId = strs[1]
+			case "partition":
+				i64, _ := strconv.ParseInt(strs[1], 10, 32)
+				partition = int32(i64)
+			case "offset":
+				i64, _ := strconv.ParseInt(strs[1], 10, 64)
+				offset = i64
+			}
+		}
+	}
+
+	// Create a new Kafka consumer
+	conf := ReadConfig(configFile)
+	conf["group.id"] = consumerGroupId
+	conf["auto.offset.reset"] = "earliest"
+	// Whether or not we store offsets automatically.
+	conf["enable.auto.offset.store"] = false
+	conf["session.timeout.ms"] = 600000
+	conf["max.poll.interval.ms"] = 900000
+	conf["heartbeat.interval.ms"] = 1000
+
+	c, err := kafka.NewConsumer(&conf)
+
+	if err != nil {
+		fmt.Printf("Failed to create consumer: %s\n", err)
+		os.Exit(1)
+	}
+
+	topic := "purchases"
+	_ = c.SubscribeTopics([]string{topic}, nil)
+
+	// Assign the topic partition to the consumer
+	tp := kafka.TopicPartition{Topic: &topic, Partition: partition, Offset: kafka.Offset(offset)}
+	err = c.Assign([]kafka.TopicPartition{tp})
+	if err != nil {
+		fmt.Printf("Failed to assign the topic partition to the consumer: %s\n", err)
+		os.Exit(1)
+	}
+
+	// Seek to the specified offset
+	err = c.Seek(tp, 100)
+	if err != nil {
+		fmt.Printf("Failed to seek from the offset: %s\n", err)
+	}
+
+	// Consume message at specified offset so the offset advances to next
+	fmt.Printf("\n ***** Skipping offset on consumer-group-id = \"%s\", partition = %v, offset = %v\n", consumerGroupId, partition, offset)
+	msg, err := c.ReadMessage(1000 * time.Millisecond)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading message from offset %v\n", offset)
+		os.Exit(1)
+	}
+	fmt.Printf("Received message: %v\n", string(msg.Value))
+
+	// Manually commit the offset for the consumed message
+	_, err = c.CommitMessage(msg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error committing message %s \n %s\n",
+			msg.TopicPartition, err)
+	}
+
+	defer c.Close()
 }
 
 func createTopic(configFile string) {
@@ -125,15 +218,31 @@ func writeToTopic(configFile string) {
 	}()
 
 	users := [...]string{"eabara", "jsmith", "sgarcia", "jbernard", "htanaka", "awalther"}
-	items := [...]string{"book", "alarm clock", "t-shirts", "gift card", "batteries"}
+	items := [...]string{"books", "alarm clocks", "t-shirts", "gift cards", "batteries"}
 
-	for n := 0; n < 10000; n++ {
+	event := Event{
+		User:  "default",
+		Items: "none",
+	}
+
+	for n := 0; n < 10; n++ {
 		key := users[rand.Intn(len(users))]
 		data := items[rand.Intn(len(items))]
+		//populate event data
+		event.User = key
+		event.Items = data
+
+		//json marshal
+		b, err := json.Marshal(event)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+
 		p.Produce(&kafka.Message{
 			TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
 			Key:            []byte(key),
-			Value:          []byte(data),
+			Value:          []byte(string(b)),
 		}, nil)
 	}
 
@@ -173,10 +282,19 @@ func readFromTopic(configFile string, consumerGroupId string) {
 				// Errors are informational and automatically handled by the consumer
 				continue
 			}
-			fmt.Printf("Consumed event from topic %s: key = %-10s value = %s\n",
-				*ev.TopicPartition.Topic, string(ev.Key), string(ev.Value))
+			var event Event
+			//unmarshal topic message
+			err = json.Unmarshal(ev.Value, &event)
+			//if message is not in expected format, exit the process
+			if err != nil {
+				fmt.Printf("Error in unmarshalling event %v: terminating. partition: %v, offset: %v\n", string(ev.Value), ev.TopicPartition.Partition, ev.TopicPartition.Offset)
+				return
+			}
+
+			fmt.Printf("Consumed event from topic = \"%s\", partition = %v, offset: %v: key = %-10s value = %s\n",
+				*ev.TopicPartition.Topic, ev.TopicPartition.Partition, ev.TopicPartition.Offset, string(ev.Key), string(ev.Value))
 		}
 	}
 
-	c.Close()
+	defer c.Close()
 }
